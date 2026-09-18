@@ -27,7 +27,7 @@ const float THETA_OFFSET =  3.949147f;      // rad
 // ================== Test Settings ==================
 const uint16_t SAMPLE_MS        = 20;       // control interval [ms]
 const int      BASELINE_SAMPLES = 10;       // samples held at 0 V before the ramp (0.2 s)
-const float    RAMP_STEP        = 0.002f;   // voltage increase per sample [V] (0.1 V/s)
+const float    RAMP_STEP        = 0.001f;   // voltage increase per sample [V] (0.05 V/s, 20 s per volt)
 const float    V_MAX            = 4.0f;     // stop the ramp if |V| reaches this [V]
 const int      AVG_SAMPLES      = 5;        // moving average length for motion detection
 const float    MOTION_THRESHOLD = 0.03f;    // averaged theta change that counts as motion [rad]
@@ -36,9 +36,10 @@ const float    V_TEST           = 0.1f;     // small command for the dead zone c
 const int      PULSE_SAMPLES    = 50;       // dead zone check duration (1 s)
 
 // ================== Stiction Compensation ==================
-// Magnitudes added to the command in each direction (filled in after Task 5)
-const float STICTION_POS = 0.0f;   // added when V > 0 [V]
-const float STICTION_NEG = 0.0f;   // subtracted when V < 0 [V]
+// Magnitudes added to the command in each direction
+// Task 5: mean + 2 sd of breakaway voltage over 54 ramp runs (theta = -0.5, 0, +0.5 rad)
+const float STICTION_POS = 0.277f;   // added when V > 0 (CW)  [V]
+const float STICTION_NEG = 0.259f;   // subtracted when V < 0 (CCW) [V]
 
 // ================== Test State ==================
 enum TestState { IDLE = 0, BASELINE = 1, RAMP = 2, PULSE = 3 };

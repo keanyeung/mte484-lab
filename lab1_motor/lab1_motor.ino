@@ -12,6 +12,12 @@ int BAL_PIN = A1;   // ball position sensor
 const float THETA_M      = -3.645179e-4f;   // rad per ADC count
 const float THETA_OFFSET =  3.949147f;      // rad
 
+// ================== Stiction Compensation ==================
+// Part (d): mean + 2 sd of breakaway voltage over 54 ramp runs (theta = -0.5, 0, +0.5 rad)
+// +V turns the large gear CW (theta decreases), -V turns it CCW (theta increases)
+const float STICTION_POS = 0.277f;   // added when V > 0 (CW)  [V]
+const float STICTION_NEG = 0.259f;   // subtracted when V < 0 (CCW) [V]
+
 
 // ================== Setup ==================
 void setup() {
@@ -31,6 +37,14 @@ void setup() {
 // ================== Loop ==================
 void loop() {
 
+}
+
+// ================== Stiction Compensation ==================
+// Pushes a nonzero command past the dead zone in its direction; zero stays zero
+float applyStiction(float v) {
+  if (v > 0.0f) return v + STICTION_POS;
+  if (v < 0.0f) return v - STICTION_NEG;
+  return 0.0f;
 }
 
 // ================== Control ISR ==================
