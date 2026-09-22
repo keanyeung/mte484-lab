@@ -1,0 +1,109 @@
+Plan: Lab 1 (e) Plant Identification (K₁, τ)
+Complexity: Medium. That's one new sketch, one Python analysis script, a bench session, and the report write-up.
+
+Summary
+Close a proportional loop around the motor. Drive it with a −0.1 ↔ +0.1 rad square wave and record each step at 1–2 ms into RAM, then dump it over serial. A Python script measures %OS and Tp on every step, converts them to ζ and ωₙ, and then to K₁ and τ. It repeats this for 3 negative gains and checks the averages against the expected ranges (|K₁| = 1.5–3.0 rad/(V·s), τ = 10–35 ms).
+
+Assumptions
+Reference: −0.1 ↔ +0.1 rad square wave, so each step is 0.2 rad and each period gives one CW and one CCW step.
+Logging: samples are buffered in RAM during a capture and printed after it ends.
+Analysis: Python, following the same pattern as analyze_stiction.py.
+Board: UNO R4 with 32 KB SRAM, inferred from analogReadResolution(14). Verify this before sizing the buffer.
+Sign convention (from part d): +V makes θ decrease, so K₁ < 0 and K_p < 0. With e = θ_ref − θ, V = K_p·e.
+Desk calculation that shapes the experiment
+Voltage limit caps the gain: the largest command is |K_p|·0.2 + ~0.28 V of stiction offset, and it must stay under 6 V. So |K_p| ≤ ~28 V/rad.
+Overshoot may be small: ζ = 1 / (2√(τ·K_p·K₁)). Using the mid-range values (K₁ = −2.25, τ = 0.02) with K_p = −25 gives ζ ≈ 0.47 (OS ≈ 19%, Tp ≈ 67 ms). With K_p = −10, ζ ≈ 0.75 and OS is only ~3%, which is too small to measure well.
+What that means: the usable gains are roughly −15 to −28 V/rad. If the real plant has small τ and small K₁, overshoot may be marginal, so a pilot run to choose gains is essential.
+Sampling: at 1 ms there are ~40–100 samples before the first peak, and at 2 ms about half that. The part (d) rate of 20 ms is far too slow.
+Settling time: Ts ≈ 4·(2τ) = 80–280 ms. A 1 s half-period leaves plenty of margin for settling.
+Interface contract (fix this first so the sketch and script can be built in parallel)
+The sketch's dump format, which the Python script will parse:
+
+
+# capture <n> kp=<Kp> dir=<+|-> dt_us=<interval> samples=<N>
+<i>,<t_us>,<ref>,<V>,<motor>,<theta>
+...
+# end capture <n>
+Message lines start with #, as in the part (d) sketch.
+Sample 0 is the square-wave edge.
+t_us comes from micros() so the script can detect timing jitter.
+Files to Change
+File	Action	Why
+lab1_sysid/lab1_sysid.ino	CREATE	P-control + square wave + stiction + buffered capture
+1e sysid readings/analyze_sysid.py	CREATE	Parse captures, compute OS/Tp → ζ, ωₙ → K₁, τ
+1e sysid readings/test_analyze_sysid.py	CREATE	Synthetic 2nd-order responses with known K₁, τ to check the maths
+1e sysid readings/kp*_run*.txt	CREATE (bench)	CoolTerm captures
+lab1_motor/lab1_motor.ino	UPDATE	Add identified K₁, τ constants for Labs 2 and 3
+task briefs/parte_brief.txt	CREATE	Brief for the report (currently partd_brief.txt is empty)
+Patterns to reuse
+Category	Source	Pattern
+Sketch layout	lab1_stiction_test.ino	// ==== section banners, UPPER_SNAKE constants, loop() only reads commands, all work happens in interval_control_code()
+Commands	lab1_stiction_test.ino:78-85	Single-character commands stored in volatile pendingCommand
+Stiction	lab1_motor.ino:44-48	Reuse applyStiction() and the STICTION_POS/NEG values unchanged
+Safety	lab1_stiction_test.ino:36	THETA_LIMIT stop, and refuse to start when θ is out of range
+Analysis	analyze_stiction.py	Module docstring with usage, regex parsing of # lines, HERE-relative paths, CSV outputs next to the script
+Tests	none in repo	Nothing to follow yet. The new test file uses plain pytest
+Subtasks
+Tasks A, B and C are independent and can run in parallel once the interface contract is fixed. D depends on A. E depends on A and D. F depends on B and E. G comes last.
+
+Task A: Sysid sketch (lab1_sysid.ino)
+Controller: V = applyStiction(K_p·(θ_ref − θ)), then clamp to ±V_SAT = 5.5 V. Also stop if |θ| > THETA_LIMIT.
+Square wave: HALF_PERIOD_MS = 1000, amplitude REF_AMP = 0.1 rad. Toggle by counting samples, not by calling millis().
+Gain selection from serial: keys 1/2/3 choose preset K_p values. k<value>\n sets any K_p. g starts the loop, s stops at 0 V, c arms a capture.
+Capture: after c, the next 2 edges (one up, one down) are recorded into a static buffer. Each sample stores uint32 t_us, int16 V_mV, uint16 motor, which is 8 B. 2 × 600 samples at 1 ms is ~10 KB. loop() prints the buffer once it's full, and the ISR never prints during a capture.
+Saturation flag: count the samples where the clamp was active and print the count in the capture header.
+Validate: compile in the Arduino IDE. On the bench, s stops the motor immediately and a capture dumps cleanly with the right sample count.
+Task B: Analysis script (analyze_sysid.py)
+Steps for each capture:
+
+Parse it with regexes following the contract above.
+Convert samples to time relative to the edge.
+Find θ₀ (the mean before the edge, or sample 0) and θ_ss (the mean of the last 20% of the window).
+Find the peak: the first extremum in the step direction.
+Compute %OS = (peak − θ_ss)/(θ_ss − θ₀)·100 and Tp = t_peak − t_edge. Use a parabolic fit over 3 points to get sub-sample peak timing.
+Compute ζ and ωₙ from the given formulas, then τ = 1/(2ζωₙ) and K₁ = ωₙ²τ/K_p, keeping the sign.
+Flag bad steps: saturation count > 0, a flat top on the peak (≥ N samples within 1 ADC count), OS < ~3%, or steady-state error > X.
+Outputs: sysid_steps.csv (one row per step), sysid_summary.csv (mean ± sd per gain and overall), and plots.
+
+Validate: python -m pytest test_analyze_sysid.py
+Task C: Synthetic tests (test_analyze_sysid.py)
+Generate closed-loop step responses for known values, e.g. K₁ = −2.2, τ = 0.025, K_p ∈ {−15, −20, −25}. Sample at 1 ms, add ±1 count of quantization noise, and write them in the contract format.
+Assert the script recovers K₁ and τ within 3%.
+Check that a flat-topped peak or a saturated step gets flagged.
+Check both CW and CCW steps give positive OS.
+Why: this catches sign and step-size errors before any bench time is spent.
+Task D: Sampling rate determination (bench)
+Toggle A5 around the ISR body, which is already wired in lab1_motor.ino:61. Measure the ISR execution time on the scope at 1 ms and 2 ms intervals.
+Pick the shortest interval where execution time < ~50% of the interval and there's no jitter in t_us.
+Justification for the report: Tp is expected to be ~40–100 ms, so the rate needs ≥ 20 samples before the peak. The rate also has to be fast enough that the sampling delay is negligible compared with τ.
+Task E: Pilot run and stiction check (bench)
+Run K_p = −15, −20, −25. Look at captured plots, not only the Serial Plotter.
+Stiction checklist (from the brief): the first peak should be rounded with no flat top, there should be no gear chatter or limit cycling at steady state, and steady-state error should be small.
+If the peak is flat, raise the offset slightly. If there's chatter, lower it. Record whatever was changed.
+Pick 3 final gains: all with OS clearly above 10%, all with no saturation, and spread across the range.
+Task F: Data collection (bench)
+For each of the 3 gains, take at least 5 captures, which is 10 steps: 5 CW and 5 CCW.
+Save one file per gain per run: 1e sysid readings/kp20 run1.txt. Use the same step size throughout.
+Run analyze_sysid.py at the bench so bad data can be re-shot immediately.
+Task G: Model validation and report
+Simulate the closed loop using the averaged K₁ and τ for each K_p, and overlay the result on the measured responses.
+Report per-gain K₁ and τ, and the consistency across gains. This is the main credibility check: τ and K₁ should not depend on K_p.
+Compare the results with the expected ranges and explain any CW/CCW asymmetry.
+Add PLANT_K1 and PLANT_TAU constants with source comments to lab1_motor.ino.
+Report sections: sampling rate and why, stiction verification figure, data table, final values, and the sign discussion.
+Risks
+Risk	Likelihood	Mitigation
+Overshoot too small to measure because the 6 V limit caps K_p	Medium	Pilot run in Task E. Use the largest gains that stay under 6 V. The step size stays fixed at 0.2 rad as the brief requires
+Stiction/backlash distorts the peak, so it no longer looks second-order	Medium	Flat-peak check in the script. Adjust the offset in Task E
+Sign mistake in K_p, K₁ or OS for CCW steps	Medium	Task C tests both directions. Keep the sign when computing K₁
+ISR too slow at 1 ms (14-bit ADC plus float maths)	Low	Scope measurement in Task D. Fall back to 2 ms
+RAM overflow from the capture buffer	Low	Size the buffer in the sketch and check the IDE's memory report at compile
+Steady-state error from stiction skews OS	Medium	Measure OS against θ_ss, not θ_ref, and say so in the report
+Acceptance
+ Synthetic tests pass: the script recovers K₁ and τ within 3%
+ Sampling rate is measured on the scope and justified
+ Stiction offset is verified (rounded peak, no chatter, small steady-state error) or retuned, with the reason recorded
+ 3 gains × ≥ 10 steps with no saturation or flagged steps
+ K₁ and τ agree across gains, and |K₁| is in 1.5–3.0 and τ in 0.010–0.035 s
+ Simulated model overlays the measured responses
+ Constants added to lab1_motor.ino and the brief written

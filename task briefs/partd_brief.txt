@@ -1,0 +1,113 @@
+Plan: Part (d), measuring and compensating motor stiction
+What part (d) asks for (manual page 19)
+Measure the motor voltage needed to overcome stiction, separately for clockwise and counter-clockwise rotation of the large gear viewed from the front
+Choose offsets that ideally remove the dead zone completely
+Build stiction compensation into the Arduino code. All later parts assume it's there.
+Report: briefly explain how you found the values, and state them
+Later check: part (e) confirms the values are right. The first peak should be rounded with no flat spots, the response should settle without oscillating, and steady-state error should be small.
+Your answers
+Method: an automated slow voltage ramp that logs V and θ and cuts to 0 V as soon as the gear moves
+Code layout: a separate test sketch lab1_stiction_test. Only the compensation goes into lab1_motor.
+Thoroughness: 3 positions (θ ≈ −0.5, 0, +0.5 rad) × 3 trials × 2 directions = 18 runs
+Still in effect: I write the code, you review, compile, upload and run it, and the beam stays disconnected.
+Defaults I chose:
+
+Runs are started by typing single-letter commands in CoolTerm, since it holds COM3 while capturing
+20 ms sampling during the test
+Ramp speed 0.1 V/s
+Stops at motion, at 4 V, or at |θ| > 1.2 rad, whichever comes first
+Final offset = the highest breakaway voltage measured in each direction, so the dead zone is removed everywhere; part (e) fine-tunes it
+Patterns I'll follow (from lab1_motor.ino)
+Category	Where	What I'll do
+Section headers	line 8	// ====== Name ====== sections
+Constants	lines 12-13	Capital const float names with f and // units comments
+Sensor read and scaling	lines 42-46	Read, then theta = THETA_M * motor + THETA_OFFSET. Reuse these constants unchanged.
+Timing	line 25	Work happens in interval_control_code() via set_control_interval_ms()
+Output	lines 49-57	One comma-separated line per sample, ending with println
+Motor command	geeWhiz.cpp:33-45	setMotorVoltage(V) limits to ±6 V; positive V sets the direction pin HIGH
+New patterns (nothing to copy)	none	Reading serial commands in loop(), a small state machine (waiting → baseline → ramping → stopped), and variables shared with the timed function marked volatile
+Errors and tests	none	No test setup exists. Checking is compile, upload, logged data and watching the gear.
+Files
+File	Action	By	Why
+lab1_stiction_test/lab1_stiction_test.ino	CREATE	me	Ramp experiment
+1d stiction/stiction_neg05.txt, stiction_0.txt, stiction_pos05.txt	CREATE	you (CoolTerm)	Logged runs, one file per position with 6 runs each
+1d stiction/verify_comp.txt	CREATE	you (CoolTerm)	Evidence that the dead zone is gone
+lab1_motor/lab1_motor.ino	UPDATE	me	Add stiction constants and the compensation function
+Tasks
+Task 1 (me): Write lab1_stiction_test
+Structure: same pins, 14-bit ADC, θ scaling, geeWhiz setup and timed-function layout as lab1_motor, sampling every 20 ms
+Commands typed in CoolTerm:
++ ramps positive voltage
+- ramps negative voltage
+s stops immediately (sets 0 V)
+p / n apply a small ±0.1 V through compensation for 1 s (used in Task 6)
+Each ramp run:
+Hold 0 V for 0.2 s and record the starting θ
+Increase |V| by 0.002 V every 20 ms (0.1 V/s)
+Stop at 0 V when the averaged θ moves more than 0.03 rad from the start, or |V| reaches 4 V, or |θ| exceeds 1.2 rad
+Print one summary line with the run number, direction, V at stop and why it stopped
+Output every sample: t_ms,run,state,V,motor,theta
+All limits are named constants at the top, so they're easy to adjust
+Check: compiles in your IDE (Task 2)
+Task 2 (you): Review, compile, upload
+Beam disconnected. Disconnect CoolTerm, upload, then reconnect CoolTerm at 115200.
+Check: the output lines appear and θ reads correctly with the gear at the 0 mark.
+Task 3 (you): Direction check
+Turn the motor voltage switch on, put the gear near θ = 0, type + and watch the gear.
+Record: does positive V turn the large gear clockwise or counter-clockwise (viewed from front), and does θ go up or down? Then repeat with -.
+Check: θ changes in the expected direction, and the run stops by itself soon after the gear moves.
+This gives you the V-sign to CW/CCW mapping the report needs. From Figure 8, increasing θ should be CCW, but confirm it by watching.
+Task 4 (you): Measurement runs
+For each position, θ ≈ −0.5, 0, +0.5 rad:
+Position the gear by hand using the printed θ. Turn the motor switch off while your hands are on the gear, then back on.
+Start a CoolTerm capture: stiction_neg05.txt, stiction_0.txt or stiction_pos05.txt
+Type +, wait for it to stop by itself, type -, wait. Do this 3 times (6 runs), nudging the gear back near the position if it drifts more than about 0.1 rad.
+Stop the capture
+Warm-up first: do 2–3 unlogged runs so the gearbox friction settles.
+Check: each file has 6 runs, and each ends by motion detection rather than by hitting 4 V.
+Task 5 (me): Analyze and choose values
+For each of the 18 runs, find where motion actually started in the logged data. This is more accurate than the on-board stop point, which reacts slightly late.
+Output: a table of breakaway voltage by direction, position and trial, with mean, std. dev. and max for each direction
+Choose STICTION_POS (for positive V) and STICTION_NEG (for negative V), linked to CW/CCW from Task 3, and explain the choice
+Check: the values are consistent across trials, and the difference between directions is clear or clearly small
+Task 6 (me write, you run): Check the dead zone is gone
+Put the chosen values into the test sketch. Use p / n to apply ±0.1 V through compensation at each position, and capture verify_comp.txt.
+Check: the gear moves in both directions from a very small command. For comparison, the same ±0.1 V without compensation shouldn't move it.
+Task 7 (me, you compile): Add compensation to lab1_motor
+Add a // ================== Stiction Compensation ================== section with:
+STICTION_POS and STICTION_NEG constants, with comments giving CW/CCW and the source
+applyStiction(V): positive V gets +STICTION_POS, negative V gets −STICTION_NEG, and exactly 0 stays 0
+The motor stays at 0 V for now. Compensation is first used by the controller in part (e).
+Check: compiles and behaves the same as before (no motion, same output).
+Task 8 (me draft, you edit): Report section for (d)
+Method (ramp, positions, trials, motion criterion), direction mapping, values table, chosen offsets and why, dead-zone check result, compensation code excerpt, and a note that part (e) confirms the values
+Risks
+Risk	Likelihood	How to handle it
+Noise triggers a false stop (single θ samples varied ±0.025 rad in part (c))	Medium	Average θ before comparing, 0.03 rad threshold, and Task 5 reads the start of motion from the raw log. The threshold is one constant if it needs changing.
+On-board detection reacts late, so the voltage reads slightly high	High (small effect)	Slow 0.1 V/s ramp, plus Task 5 finding the real start in the log
+Gear runs away	Low	Stops at motion, 4 V cap, ±1.2 rad limit, and the motor voltage switch works as an emergency stop
+Hands near the gears with power on	Medium	Switch off while repositioning. Motor stays at 0 V between runs.
+Commands don't reach the Arduino	Medium	Send them from CoolTerm (typing in its window or Connection → Send String). Serial Monitor must be closed.
+Friction varies with position or warm-up	Medium	3 positions, warm-up runs, and use the highest value per direction
+Gear backlash when reversing gives a false early or late start	Low	θ is measured at the output gear, and the averaging and threshold ignore small play
+Timed-function and main loop share variables unsafely	Low	Mark them volatile and keep command handling short
+Compensation causes back-and-forth jitter near zero command in part (e)	Medium (later)	Not in scope here. Part (e)'s check handles it, possibly by adjusting offsets.
+Compensation function exists in two sketches	Low	Keep it tiny and copy it exactly. lab1_motor holds the official values.
+AI-written code vs. authorship declaration	Medium	Credit it under clause (e) and make sure you can explain every line
+Complexity: Medium
+Code review, compile and upload: about 10 min
+Direction check and warm-up: about 5 min
+18 runs: about 20–30 min
+Dead-zone check: about 10 min
+Analysis, update lab1_motor and report edits: about 20 min on your side
+Total: about 65–75 minutes
+
+Done when
+ lab1_stiction_test compiles, uploads and stops itself when motion starts
+ Voltage sign to CW/CCW mapping recorded
+ 18 runs logged across 3 files
+ STICTION_POS and STICTION_NEG chosen with evidence
+ Dead zone shown to be gone in both directions
+ lab1_motor updated with compensation and compiles
+ Report draft for (d) done
+WAITING FOR CONFIRMATION: go ahead with this plan? (yes / no / modify)
