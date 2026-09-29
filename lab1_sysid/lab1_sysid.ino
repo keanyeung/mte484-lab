@@ -10,8 +10,9 @@
 // Commands (type in CoolTerm, Kp can only change while stopped):
 //   g  start the square wave          s  stop immediately (0 V)
 //   c  capture the next 2 steps (one up, one down)
+//   C  capture a whole data set: BATCH_CAPTURES captures back to back
 //   1 2 3  select a preset Kp         k<value><Enter>  set Kp, e.g. k-18.5
-//   v  toggle the live stream
+//   v  toggle the live stream           d  print ISR timing and reset it
 //
 // Live stream line:  ref,theta,V   (every STREAM_EVERY samples)
 // Capture block, one per step:
@@ -45,6 +46,7 @@ constexpr float    START_LIMIT    = 0.3f;   // refuse to start if |theta| is abo
 constexpr float    THETA_LIMIT    = 0.6f;   // safety stop if |theta| exceeds this [rad]
 constexpr uint32_t CAPTURE_MS     = 600;    // recording window after each edge [ms]
 constexpr int      CAPTURE_EDGES  = 2;      // steps per capture (one up, one down)
+constexpr int      BATCH_CAPTURES = 5;      // captures in one 'C' batch (10 steps)
 constexpr int      STREAM_EVERY   = 20;     // live stream decimation [samples]
 const float        KP_PRESETS[3]  = { -15.0f, -20.0f, -25.0f };   // keys 1 2 3 [V/rad]
 
@@ -98,6 +100,15 @@ volatile float streamV      = 0.0f;
 
 char gainBuf[12];
 int  gainLen = -1;   // -1 when not typing a k<value> command
+int  batchLeft = 0;  // captures still to record in the current 'C' batch
+
+// ISR timing, the software version of the A5 scope check
+volatile uint32_t isrSumUs = 0;    // total execution time [us]
+volatile uint32_t isrMaxUs = 0;    // worst execution time [us]
+volatile uint32_t isrCount = 0;    // cycles measured
+volatile uint32_t gapMinUs = 0xFFFFFFFF;   // shortest interval between cycles [us]
+volatile uint32_t gapMaxUs = 0;            // longest interval between cycles [us]
+uint32_t lastIsrUs = 0;            // ISR only: start time of the previous cycle
 
 
 // ================== Setup ==================
@@ -110,7 +121,7 @@ void setup() {
 
   // Print the header before the timer starts
   Serial.println("# geeWhiz Started - system identification");
-  Serial.println("# commands: g s c 1 2 3 k<value> v");
+  Serial.println("# commands: g s c C 1 2 3 k<value> v d");
   Serial.print("# presets Kp: ");
   Serial.print(KP_PRESETS[0], 1); Serial.print(" ");
   Serial.print(KP_PRESETS[1], 1); Serial.print(" ");
@@ -129,11 +140,16 @@ void loop() {
 
   if (limitTripped) {
     limitTripped = false;
+    batchLeft = 0;
     Serial.println("# stop LIMIT: |theta| above THETA_LIMIT, capture discarded");
   }
 
-  if (captureState == CAP_READY) dumpCapture();
-  else                           printStream();
+  if (captureState == CAP_READY) {
+    dumpCapture();
+    advanceBatch();
+  } else {
+    printStream();
+  }
 }
 
 // ================== Stiction Compensation ==================
@@ -158,7 +174,9 @@ void handleCommand(char c) {
     case 'g': startControl();  break;
     case 's': stopFromUser();  break;
     case 'c': armCapture();    break;
+    case 'C': armBatch();      break;
     case 'v': toggleStream();  break;
+    case 'd': printIsrTiming(); break;
     case '1': case '2': case '3': setGain(KP_PRESETS[c - '1']); break;
     case 'k': gainLen = 0;     break;
     default:                   break;   // ignore line endings and unknown keys
@@ -219,10 +237,12 @@ void stopFromUser() {
                     captureState == CAP_BETWEEN);
   stopControl();
   interrupts();
+  batchLeft = 0;
   Serial.println(cancelled ? "# stop (capture cancelled)" : "# stop");
 }
 
-void armCapture() {
+// Arms one capture; returns false (with a reason) if the loop is not ready
+bool armNextCapture() {
   noInterrupts();
   bool running = (runState == RUNNING);
   bool idle    = (captureState == CAP_IDLE);
@@ -231,7 +251,41 @@ void armCapture() {
 
   if (!running)   Serial.println("# refused: start with g first");
   else if (!idle) Serial.println("# refused: capture already in progress");
-  else            Serial.println("# capture armed, recording the next 2 steps");
+  return running && idle;
+}
+
+void armCapture() {
+  if (armNextCapture()) Serial.println("# capture armed, recording the next 2 steps");
+}
+
+void armBatch() {
+  if (!armNextCapture()) return;
+  batchLeft = BATCH_CAPTURES;
+  printBatchProgress();
+}
+
+// Called after each dump: arms the next capture of the batch, or reports the total
+void advanceBatch() {
+  if (batchLeft == 0) return;
+  batchLeft--;
+  if (batchLeft > 0 && armNextCapture()) printBatchProgress();
+  else                                   printBatchDone();
+}
+
+void printBatchProgress() {
+  Serial.print("# batch capture ");
+  Serial.print(BATCH_CAPTURES - batchLeft + 1);
+  Serial.print("/");
+  Serial.println(BATCH_CAPTURES);
+}
+
+void printBatchDone() {
+  Serial.print("# batch done: ");
+  Serial.print((BATCH_CAPTURES - batchLeft) * CAPTURE_EDGES);
+  Serial.print(" steps at kp=");
+  Serial.println(kp, 2);
+  batchLeft = 0;
+  printIsrTiming();
 }
 
 void toggleStream() {
@@ -242,6 +296,43 @@ void toggleStream() {
 void printGain() {
   Serial.print("# kp=");
   Serial.println(kp, 2);
+}
+
+// Software version of the A5 scope check: how long the control ISR takes,
+// and how regular the intervals between cycles are. Printing resets the stats.
+void printIsrTiming() {
+  noInterrupts();
+  uint32_t sum = isrSumUs, worst = isrMaxUs, n = isrCount;
+  uint32_t gapLo = gapMinUs, gapHi = gapMaxUs;
+  isrSumUs = isrMaxUs = isrCount = gapMaxUs = 0;
+  gapMinUs = 0xFFFFFFFF;
+  interrupts();
+
+  if (n == 0) {
+    Serial.println("# isr timing: no samples yet");
+    return;
+  }
+  Serial.print("# isr_us mean=");   Serial.print(sum / n);
+  Serial.print(" max=");            Serial.print(worst);
+  Serial.print(" of ");             Serial.print((uint32_t)SAMPLE_MS * 1000UL);
+  Serial.print("  gap_us min=");    Serial.print(gapLo);
+  Serial.print(" max=");            Serial.print(gapHi);
+  Serial.print("  n=");             Serial.println(n);
+}
+
+// Called at the end of every control cycle
+void recordIsrTiming(uint32_t startUs) {
+  uint32_t duration = micros() - startUs;
+  isrSumUs += duration;
+  isrCount++;
+  if (duration > isrMaxUs) isrMaxUs = duration;
+
+  if (lastIsrUs != 0) {
+    uint32_t gap = startUs - lastIsrUs;
+    if (gap < gapMinUs) gapMinUs = gap;
+    if (gap > gapMaxUs) gapMaxUs = gap;
+  }
+  lastIsrUs = startUs;
 }
 
 // ================== Control Helpers (ISR context) ==================
@@ -375,5 +466,6 @@ void interval_control_code(void) {
 
   // ---- Apply voltage ----
   setMotorVoltage(motorVoltage);
+  recordIsrTiming(tUs);
   digitalWrite(A5, LOW);
 }

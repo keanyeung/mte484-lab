@@ -18,6 +18,18 @@ const float THETA_OFFSET =  3.949147f;      // rad
 const float STICTION_POS = 0.277f;   // added when V > 0 (CW)  [V]
 const float STICTION_NEG = 0.259f;   // subtracted when V < 0 (CCW) [V]
 
+// ================== Plant Model ==================
+// theta(s) / V(s) = PLANT_K1 / (s (PLANT_TAU s + 1))
+// Part (e): %OS and Tp of 30 closed-loop steps of 0.2 rad (Kp = -15, -20 and
+// -25 V/rad, 10 steps each) converted to zeta and wn, then to K1 and tau.
+// Spread is one standard deviation over those 30 steps.
+// Per gain: K1 = -1.929, -1.814, -1.906 and tau = 20.8, 22.2, 21.9 ms, i.e. no
+// trend with Kp. Simulating the steps from these values matches the measured
+// angle to 0.0025 rad rms, which is 1.3 % of the step (validate_model.py).
+// K1 < 0 because +V turns the large gear CW, which makes theta decrease.
+const float PLANT_K1  = -1.883f;    // rad/(V s), +- 0.118
+const float PLANT_TAU =  0.0216f;   // s, i.e. 21.6 +- 1.3 ms
+
 
 // ================== Setup ==================
 void setup() {
