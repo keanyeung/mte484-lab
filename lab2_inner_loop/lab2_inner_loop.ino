@@ -28,7 +28,7 @@
 //   # trip log ...   then   trip,i,theta,V   (i = 0 is the sample that stopped
 //   the loop)   then   # end trip log
 // Live stream line (every STREAM_EVERY samples, paused during a capture):
-//   t_ms,ref_raw,ref_sat,theta,V
+//   t_ms,ref_raw,ref_sat,theta,V,y_m        (y_m = ball centre, Lab 2 (e))
 // Capture block, one per step, 1 ms samples:
 //   # capture <id> ctrl=D1 dir=<+|-> dt_us=<interval> samples=<N> over6=<count>
 //   i,t_us,ref,V,u,motor,theta        (i = 0 is the reference edge)
@@ -39,11 +39,19 @@
 
 // ================== Pins ==================
 int MOT_PIN = A0;   // motor angle sensor
+int BAL_PIN = A1;   // ball position sensor
 
 // ================== Sensor Scaling ==================
 // From Lab 1 (c): theta [rad] = THETA_M * reading [counts] + THETA_OFFSET
 const float THETA_M      = -3.645179e-4f;   // rad per ADC count
 const float THETA_OFFSET =  3.949147f;      // rad
+
+// From Lab 2 (e): ball centre y [m] = BALL_M * reading [counts] + BALL_OFFSET,
+// y = 0 at the left stopper's inner face. Least-squares fit over 16 points at
+// 8 positions (analyze_ball_scaling.py): R^2 = 0.99995, worst residual 1.4 mm.
+// The ball centre can reach 0.0127 m (left stopper) to 0.3693 m (right stopper).
+const float BALL_M      = 2.454620e-05f;    // m per ADC count
+const float BALL_OFFSET = -0.004055f;       // m
 
 // ================== Stiction Compensation ==================
 // Lab 2 (d), beam attached, ball off: mean + 2 sd of breakaway voltage over
@@ -159,6 +167,7 @@ volatile float    streamRaw   = 0.0f;
 volatile float    streamSat   = 0.0f;
 volatile float    streamTheta = 0.0f;
 volatile float    streamV     = 0.0f;
+volatile float    streamBallY = 0.0f;   // ball centre [m]
 
 // ISR timing, the software version of the A5 scope check
 volatile uint32_t isrSumUs = 0;
@@ -183,7 +192,7 @@ void setup() {
   Serial.print(" a1=");        Serial.print(D1_A1, 9);
   Serial.print(" b1=");        Serial.print(D1_B1, 9);
   Serial.print(" Ts_ms=");     Serial.println(SAMPLE_MS);
-  Serial.println("# t_ms,ref_raw,ref_sat,theta,V");
+  Serial.println("# t_ms,ref_raw,ref_sat,theta,V,y_m");
   printAmplitude();
 
   geeWhizBegin();
@@ -501,7 +510,7 @@ void logTripSample(float theta) {
   if (!running && --tripPostLeft == 0) tripLogReady = true;
 }
 
-void updateStream(uint32_t nowMs, float theta) {
+void updateStream(uint32_t nowMs, float theta, float ballY) {
   if (++streamCount < STREAM_EVERY) return;
   streamCount = 0;
   streamMs    = nowMs;
@@ -509,6 +518,7 @@ void updateStream(uint32_t nowMs, float theta) {
   streamSat   = refSat;
   streamTheta = theta;
   streamV     = motorVoltage;
+  streamBallY = ballY;
   streamReady = true;
 }
 
@@ -533,7 +543,7 @@ void printStream() {
 
   noInterrupts();
   uint32_t t = streamMs;
-  float raw = streamRaw, sat = streamSat, th = streamTheta, v = streamV;
+  float raw = streamRaw, sat = streamSat, th = streamTheta, v = streamV, y = streamBallY;
   streamReady = false;
   interrupts();
 
@@ -541,7 +551,8 @@ void printStream() {
   Serial.print(raw, 3);   Serial.print(",");
   Serial.print(sat, 3);   Serial.print(",");
   Serial.print(th, 4);    Serial.print(",");
-  Serial.println(v, 3);
+  Serial.print(v, 3);     Serial.print(",");
+  Serial.println(y, 4);
 }
 
 // Prints the frozen trip log, oldest sample first; i = 0 is the sample that stopped the loop
@@ -634,11 +645,14 @@ void interval_control_code(void) {
 
   logTripSample(theta);
 
-  // Streams while stopped too (V = 0), so the gear can be centred by hand
-  updateStream(millis(), theta);
-
   // ---- Apply voltage ----
   setMotorVoltage(motorVoltage);
+
+  // ---- Ball position, read after the motor update so it adds no control delay ----
+  float ballY = BALL_M * analogRead(BAL_PIN) + BALL_OFFSET;   // ball centre [m]
+
+  // Streams while stopped too (V = 0), so the gear can be centred by hand
+  updateStream(millis(), theta, ballY);
   recordIsrTiming(tUs);
   digitalWrite(A5, LOW);
 }
