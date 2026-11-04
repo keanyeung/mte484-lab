@@ -20,6 +20,9 @@
 //   c  capture the next 2 steps (one up, one down), full amplitude only
 //   C  capture a whole data set: BATCH_CAPTURES captures back to back
 //   v  toggle the live stream          d  print ISR timing and reset it
+//   h<rad><Enter>  hold mode (Lab 2 f): g then holds that gear angle (within
+//          +-0.7, saturator applies) instead of the square wave; a leaves it.
+//          Start line: # start hold ref=<rad> ctrl=D1 ... stiction_pos= stiction_neg=
 //   x / X  arm the 0.8 rad cutoff test toward +0.95 / -0.95 rad, BEAM OFF ONLY:
 //          the next g holds that reference with the saturator bypassed until
 //          the cutoff stops the loop; any stop or trip disarms it
@@ -138,6 +141,13 @@ volatile uint32_t     overVoltage  = 0;       // samples beyond the D/A range si
 volatile int8_t       cutoffArmed   = 0;      // +1 / -1 armed toward +-CUTOFF_TEST_REF, 0 off
 volatile bool         cutoffRunning = false;
 
+// Hold mode (h): a fixed gear-angle reference instead of the square wave, Lab 2 (f)
+bool                  holdMode      = false;  // set by h, cleared by a
+float                 holdRef       = 0.0f;   // [rad], within +-REF_SAT
+volatile bool         holdRunning   = false;  // the current run is a hold
+char                  holdBuf[16];
+int                   holdLen       = -1;     // -1 when not typing an h<value> command
+
 // Trip log: ring buffer of the last TRIP_LOG_N samples, frozen TRIP_POST samples after a trip
 float         tripLogTheta[TRIP_LOG_N];       // [rad]
 float         tripLogV[TRIP_LOG_N];           // command sent that sample [V]
@@ -187,7 +197,7 @@ void setup() {
   delay(300);
 
   Serial.println("# geeWhiz Started - inner loop with D1[z] (Lab 2 c)");
-  Serial.println("# commands: g s a c C v d x X");
+  Serial.println("# commands: g s a c C v d x X h<rad>");
   Serial.print("# D1: a0=");   Serial.print(D1_A0, 9);
   Serial.print(" a1=");        Serial.print(D1_A1, 9);
   Serial.print(" b1=");        Serial.print(D1_B1, 9);
@@ -249,7 +259,13 @@ float saturate(float value) {
 // ================== Commands ==================
 void readCommands() {
   while (Serial.available() > 0) {
-    switch (Serial.read()) {
+    char c = Serial.read();
+    if (holdLen >= 0) {   // typing the angle after h
+      readHoldChar(c);
+      continue;
+    }
+    switch (c) {
+      case 'h': beginHoldEntry();  break;
       case 'g': startControl();    break;
       case 's': stopFromUser();    break;
       case 'a': toggleAmplitude(); break;
@@ -278,11 +294,15 @@ void startControl() {
   int8_t test = cutoffArmed;
   if (test != 0) {
     refRaw = refSat = test * CUTOFF_TEST_REF;   // saturator bypassed for this run only
+  } else if (holdMode) {
+    refRaw = holdRef;
+    refSat = saturate(refRaw);                  // the saturator still applies to a hold
   } else {
     refRaw = -refAmp;
     refSat = saturate(refRaw);
   }
   cutoffRunning = (test != 0);
+  holdRunning   = (test == 0) && holdMode;
   halfCount    = 0;
   streamCount  = 0;
   overVoltage  = 0;
@@ -299,6 +319,13 @@ void startControl() {
     Serial.print("# start cutoff_test ref=");  Serial.print(test * CUTOFF_TEST_REF, 3);
     Serial.print(" limit=");                   Serial.print(THETA_LIMIT, 2);
     Serial.print(" limit_samples=");           Serial.println(LIMIT_SAMPLES);
+    return;
+  }
+  if (holdRunning) {
+    Serial.print("# start hold ref=");         Serial.print(refSat, 3);
+    Serial.print(" ctrl=D1 dt_ms=");           Serial.print(SAMPLE_MS);
+    Serial.print(" stiction_pos=");            Serial.print(STICTION_POS, 3);
+    Serial.print(" stiction_neg=");            Serial.println(STICTION_NEG, 3);
     return;
   }
   Serial.print("# start ctrl=D1 ref_amp=");  Serial.print(refAmp, 2);
@@ -328,8 +355,50 @@ void toggleAmplitude() {
     Serial.println("# refused: stop with s before changing the amplitude");
     return;
   }
+  if (holdMode) {          // a leaves hold mode and keeps the current amplitude
+    holdMode = false;
+    Serial.print("# hold off, back to the square wave. ");
+    printAmplitude();
+    return;
+  }
   refAmp = (refAmp == REF_AMP_FULL) ? REF_AMP_BRINGUP : REF_AMP_FULL;
   printAmplitude();
+}
+
+// ================== Hold mode (Lab 2 (f)) ==================
+// h<rad><Enter> sets a fixed gear-angle reference; g then holds it instead of
+// running the square wave, so the beam stays at one angle while the ball rolls.
+void beginHoldEntry() {
+  if (runState == RUNNING) {
+    Serial.println("# refused: stop with s before setting a hold angle");
+    return;
+  }
+  holdLen = 0;
+}
+
+// Collects the characters after h until Enter, then validates them
+void readHoldChar(char c) {
+  if (c != '\n' && c != '\r') {
+    if (holdLen < (int)sizeof(holdBuf) - 1) holdBuf[holdLen++] = c;
+    return;
+  }
+  holdBuf[holdLen] = '\0';
+  bool typed = holdLen > 0;
+  holdLen = -1;
+
+  char* end = nullptr;
+  float value = strtof(holdBuf, &end);
+  if (!typed || end == holdBuf || *end != '\0' || !(fabsf(value) <= REF_SAT)) {
+    Serial.print("# refused: type h then an angle within +-");
+    Serial.print(REF_SAT, 2);
+    Serial.println(" rad and Enter, e.g. h0.2 or h-0.1");
+    return;
+  }
+  holdRef  = value;
+  holdMode = true;
+  Serial.print("# hold set: ref=");
+  Serial.print(holdRef, 3);
+  Serial.println(" rad. g holds it, s stops, a returns to the square wave");
 }
 
 void printAmplitude() {
@@ -345,7 +414,7 @@ bool armNextCapture() {
   noInterrupts();
   bool running = (runState == RUNNING);
   bool idle    = (captureState == CAP_IDLE);
-  bool full    = (refAmp == REF_AMP_FULL) && !cutoffRunning;
+  bool full    = (refAmp == REF_AMP_FULL) && !cutoffRunning && !holdRunning;
   if (running && idle && full) captureState = CAP_ARMED;
   interrupts();
 
@@ -438,13 +507,14 @@ void stopControl() {
   motorVoltage  = 0.0f;
   cutoffRunning = false;
   cutoffArmed   = 0;      // the cutoff test is one-shot: every stop disarms it
+  holdRunning   = false;  // hold mode itself stays set, so g holds the same angle again
   resetController();
   if (captureState != CAP_READY) captureState = CAP_IDLE;
 }
 
 // Flips the raw reference every HALF_PERIOD_SAMPLES; returns true on the flip
 bool updateReference() {
-  if (cutoffRunning) return false;   // the cutoff test holds one reference, no edges
+  if (cutoffRunning || holdRunning) return false;   // a fixed reference, no edges
   halfCount++;
   bool edge = (halfCount >= HALF_PERIOD_SAMPLES);
   if (edge) {
