@@ -185,8 +185,8 @@ class MetricsTest(unittest.TestCase):
 
     def test_voltage_excess_over_six_volts(self):
         theta, u = clean_step(+1)
+        u[5] = -6.25 + lab.STICTION_NEG       # a controller output that commands -6.25 V
         v = [stiction(x) for x in u]
-        v[5] = -6.25
         m = metrics_of(+1, theta, u, v)
         self.assertAlmostEqual(m["v_peak"], 6.25, places=3)
         self.assertAlmostEqual(m["v_excess"], 0.25, places=3)
@@ -229,15 +229,17 @@ class SpecChecksTest(unittest.TestCase):
 
     def test_voltage_excess_within_stiction_allowance_passes(self):
         def small(theta, u, v):
-            v = list(v)
+            u, v = list(u), list(v)
             v[5] = -(lab.V_MAX + 0.25)
+            u[5] = v[5] + lab.STICTION_NEG      # keep the row consistent: V = u - offset
             return theta, u, v
         self.assertTrue(check_by_name(lab.spec_checks(self.records(small)), "voltage")[1])
 
     def test_voltage_excess_beyond_stiction_allowance_fails(self):
         def big(theta, u, v):
-            v = list(v)
+            u, v = list(u), list(v)
             v[5] = -(lab.V_MAX + 0.5)
+            u[5] = v[5] + lab.STICTION_NEG
             return theta, u, v
         self.assertFalse(check_by_name(lab.spec_checks(self.records(big)), "voltage")[1])
 
@@ -307,13 +309,63 @@ class RunStictionTest(unittest.TestCase):
                          [(lab.STICTION_POS, lab.STICTION_NEG), (0.45, 0.40)])
 
     def test_voltage_allowance_follows_the_run_stiction(self):
+        # -6.42 V: inside the 0.40 V beam offset + margin, beyond the part (c) one.
+        # Each run gets a u consistent with its own offset, as the sketch would send.
         theta, u = clean_step(+1)
         v = [stiction(x) for x in u]
-        v[5] = -(lab.V_MAX + 0.42)            # inside 0.45 V offsets, beyond the part (c) ones
-        beam = lab.step_metrics(parse_one(START_BEAM + capture_text(1, +1, theta, u, v)))
-        plain = lab.step_metrics(parse_one(capture_text(1, +1, theta, u, v)))
+        v[5] = -(lab.V_MAX + 0.42)
+        u_beam, u_plain = list(u), list(u)
+        u_beam[5], u_plain[5] = v[5] + 0.40, v[5] + lab.STICTION_NEG
+        beam = lab.step_metrics(parse_one(START_BEAM + capture_text(1, +1, theta, u_beam, v)))
+        plain = lab.step_metrics(parse_one(capture_text(1, +1, theta, u_plain, v)))
         self.assertTrue(check_by_name(lab.spec_checks([beam]), "voltage")[1])
         self.assertFalse(check_by_name(lab.spec_checks([plain]), "voltage")[1])
+
+
+class TransmissionGlitchTest(unittest.TestCase):
+    """A serial glitch can corrupt one printed value (beam_run2: -5.668 arrived as
+    -52.668). Each row is redundant: V must equal u plus the stiction offset, and
+    theta must equal the scaled motor count, so a corrupted value is detectable."""
+
+    def corrupt(self, text, sample, column, new_value):
+        lines = text.splitlines()
+        row = next(i for i, l in enumerate(lines) if l.startswith(f"{sample},{sample * 1000},"))
+        fields = lines[row].split(",")
+        fields[column] = new_value
+        lines[row] = ",".join(fields)
+        return "\n".join(lines) + "\n"
+
+    def test_corrupted_voltage_is_repaired_from_u(self):
+        theta, u = clean_step(+1)
+        text = self.corrupt(capture_text(1, +1, theta, u), 82, 3, "-52.668")
+        cap = parse_one(text)
+        self.assertAlmostEqual(cap["v"][82], stiction(u[82]), places=2)
+        self.assertEqual([r["i"] for r in cap["repaired"]], [82])
+        self.assertLess(lab.step_metrics(cap)["v_peak"], 6.2)
+
+    def test_corrupted_theta_is_repaired_from_the_motor_count(self):
+        theta, u = clean_step(-1)
+        good = parse_one(capture_text(1, -1, theta, u))["theta"][300]
+        text = self.corrupt(capture_text(1, -1, theta, u), 300, 6, "-7.7000")
+        cap = parse_one(text)
+        self.assertAlmostEqual(cap["theta"][300], good, places=4)
+        self.assertEqual([r["field"] for r in cap["repaired"]], ["theta"])
+
+    def test_clean_capture_has_no_repairs(self):
+        self.assertEqual(parse_one(capture_text(1, +1, *clean_step(+1)))["repaired"], [])
+
+    def test_beam_offsets_are_used_for_the_voltage_check(self):
+        theta, u = clean_step(+1)
+        v = [x + 0.45 if x > 0 else (x - 0.40 if x < 0 else 0.0) for x in u]
+        cap = parse_one(START_BEAM + capture_text(1, +1, theta, u, v))
+        self.assertEqual(cap["repaired"], [])
+
+    def test_cutoff_zero_volt_samples_are_not_repaired(self):
+        # A single reading past 0.8 rad sends 0 V while u holds its last value
+        theta, u = clean_step(+1)
+        v = [stiction(x) for x in u]
+        v[50] = 0.0
+        self.assertEqual(parse_one(capture_text(1, +1, theta, u, v))["repaired"], [])
 
 
 class OutputFolderTest(unittest.TestCase):

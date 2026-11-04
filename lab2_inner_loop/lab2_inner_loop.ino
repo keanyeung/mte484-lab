@@ -46,10 +46,13 @@ const float THETA_M      = -3.645179e-4f;   // rad per ADC count
 const float THETA_OFFSET =  3.949147f;      // rad
 
 // ================== Stiction Compensation ==================
-// Lab 1 (d): mean + 2 sd of breakaway voltage over 54 ramp runs
+// Lab 2 (d), beam attached, ball off: mean + 2 sd of breakaway voltage over
+// 30 ramp runs at theta = -0.5, 0, +0.5 rad (lab2_stiction_test, analyze_stiction_beam.py).
+// The beam's weight helps CW and resists CCW, so the two moved apart
+// (Lab 1 (d), beam off: STICTION_POS 0.277 V, STICTION_NEG 0.259 V).
 // +V turns the large gear CW (theta decreases), -V turns it CCW (theta increases)
-constexpr float STICTION_POS = 0.277f;   // added when u > 0 (CW)  [V]
-constexpr float STICTION_NEG = 0.259f;   // subtracted when u < 0 (CCW) [V]
+constexpr float STICTION_POS = 0.134f;   // added when u > 0 (CW)  [V]
+constexpr float STICTION_NEG = 0.723f;   // subtracted when u < 0 (CCW) [V]
 
 // ================== Controller D1[z] ==================
 // D1(z) = (D1_A0 z + D1_A1) / (z + D1_B1) = c2d(C1, 0.001, 'tustin'),

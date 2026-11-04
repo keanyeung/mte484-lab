@@ -46,6 +46,8 @@ D1_NUM = (-2.454674639351807, 2.284293610869540)   # Tustin c2d of C1(s), Ts = 1
 D1_DEN = (1.0, -0.967822458684839)
 STICTION_POS = 0.277         # added when u > 0 [V]
 STICTION_NEG = 0.259         # subtracted when u < 0 [V]
+THETA_M = -3.645179e-4       # sensor scaling, Lab 1 (c) [rad per count]
+THETA_OFFSET = 3.949147      # [rad]
 REF_SAT = 0.7                # saturated reference level [rad]
 STEP = 2 * REF_SAT           # step size, -0.7 -> +0.7 rad
 CAPTURE_SAMPLES = 800        # samples per captured step, 1 ms each
@@ -60,6 +62,8 @@ THETA_MAX = math.pi / 4      # gear damage limit [rad]
 SETTLE_FRAC = 0.02           # settling band as a fraction of the step
 SS_WINDOW_MS = 100           # tail used for the steady-state error [ms]
 MEDIAN_WINDOW = 5            # centred median filter length
+V_CHECK_TOL = 0.005          # |V - (u + offset)| beyond this marks a corrupted row [V]
+THETA_CHECK_TOL = 0.001      # |theta - scaled motor count| beyond this marks one [rad]
 
 HEADER_RE = re.compile(r"^#\s*capture\s+(\d+)\s+ctrl=(\S+)\s+dir=([+-])\s+dt_us=(\d+)\s+"
                        r"samples=(\d+)\s+over6=(\d+)")
@@ -103,7 +107,65 @@ def new_capture(match, source, stiction):
     cid, ctrl, sign, dt_us, samples, over6 = match.groups()
     return {"source": source, "id": int(cid), "ctrl": ctrl, "dir": 1 if sign == "+" else -1,
             "dt_us": int(dt_us), "samples": int(samples), "over6": int(over6),
-            "stiction": stiction, "ref": None, "t": [], "theta": [], "v": [], "u": []}
+            "stiction": stiction, "ref": None, "t": [], "theta": [], "v": [], "u": [], "motor": []}
+
+
+def expected_v(u, stiction):
+    """The command the sketch sends for controller output u (applyStiction)."""
+    pos, neg = stiction
+    if u > 0:
+        return u + pos
+    if u < 0:
+        return u - neg
+    return 0.0
+
+
+def v_consistent(v, u, stiction):
+    """True if V could be what the sketch sent for the printed u. A u that prints
+    as 0.000 may have been a tiny positive or negative value, so either offset
+    (or 0 V) is consistent with it."""
+    pos, neg = stiction
+    allowed = [expected_v(u, stiction)]
+    if abs(u) < 0.0015:
+        allowed += [u + pos, u - neg, 0.0]
+    return any(abs(v - a) <= V_CHECK_TOL for a in allowed)
+
+
+def _nearer_neighbours(values, i, candidate_a, candidate_b):
+    """Whichever candidate is closer to the mean of the samples either side of i."""
+    around = [values[j] for j in (i - 1, i + 1) if 0 <= j < len(values)]
+    centre = st.fmean(around) if around else candidate_a
+    return candidate_a if abs(candidate_a - centre) <= abs(candidate_b - centre) else candidate_b
+
+
+def repair_capture(cap):
+    """Fix values corrupted in serial transmission, using each row's redundancy.
+
+    V must equal u plus the stiction offset, and theta must equal the scaled
+    motor count. Where a pair disagrees, the value closer to its neighbours is
+    kept and the other is rebuilt from it. A 0 V sample is left alone: that is
+    the cutoff holding a single reading past 0.8 rad, with u unchanged.
+    Returns a new capture with a 'repaired' list naming every change.
+    """
+    v, u, theta = list(cap["v"]), list(cap["u"]), list(cap["theta"])
+    repaired = []
+    for i in range(len(v)):
+        want_v = expected_v(u[i], cap["stiction"])
+        if v[i] != 0.0 and not v_consistent(v[i], u[i], cap["stiction"]):
+            if _nearer_neighbours(v, i, want_v, v[i]) == want_v:
+                repaired.append({"i": i, "field": "V", "was": v[i], "now": want_v})
+                v[i] = want_v
+            else:
+                pos, neg = cap["stiction"]
+                new_u = v[i] - pos if v[i] > 0 else v[i] + neg
+                repaired.append({"i": i, "field": "u", "was": u[i], "now": new_u})
+                u[i] = new_u
+        from_count = THETA_M * cap["motor"][i] + THETA_OFFSET
+        if abs(theta[i] - from_count) > THETA_CHECK_TOL and \
+                _nearer_neighbours(theta, i, from_count, theta[i]) == from_count:
+            repaired.append({"i": i, "field": "theta", "was": theta[i], "now": from_count})
+            theta[i] = from_count
+    return {**cap, "v": v, "u": u, "theta": theta, "repaired": repaired}
 
 
 def parse_captures(lines, source):
@@ -131,17 +193,18 @@ def parse_captures(lines, source):
             continue
         m = ROW_RE.match(line)
         if m:
-            _, t_us, ref, v, u, _, theta = m.groups()
+            _, t_us, ref, v, u, motor, theta = m.groups()
             cur["ref"] = float(ref)
             cur["t"].append(int(t_us) / 1e6)
             cur["v"].append(float(v))
             cur["u"].append(float(u))
+            cur["motor"].append(int(motor))
             cur["theta"].append(float(theta))
             continue
         m = END_RE.match(line)
         if m:
             if int(m.group(1)) == cur["id"] and len(cur["theta"]) == cur["samples"]:
-                captures.append(cur)
+                captures.append(repair_capture(cur))
             else:
                 print(f"# skipped incomplete capture {cur['id']} in {source}")
             cur = None
@@ -305,6 +368,11 @@ def main(argv):
     out_dir = Path(argv[0]).resolve().parent if argv else HERE
     steps_csv, overlay_csv = out_dir / STEPS_CSV.name, out_dir / OVERLAY_CSV.name
     sim_csv = next((p for p in (out_dir / SIM_CSV.name, SIM_CSV) if p.exists()), None)
+
+    for c in captures:
+        for r in c["repaired"]:
+            print(f"# repaired {c['source']} capture {c['id']} sample {r['i']}: {r['field']} "
+                  f"{r['was']:.4f} -> {r['now']:.4f} (serial corruption; row redundancy disagreed)")
 
     no_start = sum(not c["stiction_from_start"] for c in captures)
     if no_start:
