@@ -20,7 +20,13 @@
 //   c  capture the next 2 steps (one up, one down), full amplitude only
 //   C  capture a whole data set: BATCH_CAPTURES captures back to back
 //   v  toggle the live stream          d  print ISR timing and reset it
+//   x / X  arm the 0.8 rad cutoff test toward +0.95 / -0.95 rad, BEAM OFF ONLY:
+//          the next g holds that reference with the saturator bypassed until
+//          the cutoff stops the loop; any stop or trip disarms it
 //
+// Every LIMIT trip also prints a 1 ms trip log once the gear has coasted:
+//   # trip log ...   then   trip,i,theta,V   (i = 0 is the sample that stopped
+//   the loop)   then   # end trip log
 // Live stream line (every STREAM_EVERY samples, paused during a capture):
 //   t_ms,ref_raw,ref_sat,theta,V
 // Capture block, one per step, 1 ms samples:
@@ -67,6 +73,10 @@ constexpr int      LIMIT_SAMPLES   = 2;      // consecutive readings beyond THET
 constexpr float    V_NOMINAL_MAX   = 6.0f;   // D/A range; commands past this are counted, not clipped [V]
 constexpr int      STREAM_EVERY    = 10;     // stream decimation [samples], 10 ms at SAMPLE_MS = 1
 
+constexpr float    CUTOFF_TEST_REF = 0.95f;  // reference the x / X test holds, past THETA_LIMIT [rad]
+constexpr int      TRIP_LOG_N      = 64;     // samples kept around a LIMIT trip, 1 ms each
+constexpr int      TRIP_POST       = 32;     // of those, samples recorded after the trip (coasting)
+
 constexpr uint32_t CAPTURE_MS     = 800;    // recording window after each edge [ms]
 constexpr int      CAPTURE_EDGES  = 2;      // steps per capture (one up, one down)
 constexpr int      BATCH_CAPTURES = 5;      // captures in one 'C' batch (10 steps)
@@ -77,6 +87,9 @@ constexpr int      CAPTURE_SAMPLES     = CAPTURE_MS / SAMPLE_MS;
 static_assert(REF_AMP_FULL > REF_SAT, "full reference must exceed the saturator limit or nothing clips");
 static_assert(REF_AMP_BRINGUP < REF_SAT, "bring-up reference must stay inside the saturator");
 static_assert(CAPTURE_MS < HALF_PERIOD_MS, "capture window must end before the next edge");
+static_assert(CUTOFF_TEST_REF > THETA_LIMIT, "the cutoff test must aim past the limit it tests");
+static_assert(CUTOFF_TEST_REF < 1.2f, "the cutoff test must stay inside the beam-off travel used in Lab 1");
+static_assert(TRIP_POST < TRIP_LOG_N, "the trip log must keep samples from before the trip");
 
 // ================== Capture Buffer ==================
 // Packed: 10 B per sample instead of 12, so 2 steps x 800 samples = 16 kB
@@ -109,6 +122,18 @@ volatile float        tripTheta    = 0.0f;    // the reading that completed the 
 int                   limitCount   = 0;       // ISR only: consecutive readings beyond THETA_LIMIT
 volatile float        lastTheta    = 0.0f;    // latest angle, so loop() never uses the ADC
 volatile uint32_t     overVoltage  = 0;       // samples beyond the D/A range since start
+
+// Cutoff test (x / X): armed while stopped, running until the next stop or trip
+volatile int8_t       cutoffArmed   = 0;      // +1 / -1 armed toward +-CUTOFF_TEST_REF, 0 off
+volatile bool         cutoffRunning = false;
+
+// Trip log: ring buffer of the last TRIP_LOG_N samples, frozen TRIP_POST samples after a trip
+float         tripLogTheta[TRIP_LOG_N];       // [rad]
+float         tripLogV[TRIP_LOG_N];           // command sent that sample [V]
+int           tripLogHead  = 0;               // next slot to write
+int           tripLogCount = 0;               // filled slots
+volatile int  tripPostLeft = 0;               // samples still to record after a trip
+volatile bool tripLogReady = false;           // set by the ISR, printed by loop()
 
 float    refAmp       = REF_AMP_BRINGUP;   // raw square wave amplitude [rad]
 float    refRaw       = -REF_AMP_BRINGUP;  // saturator input [rad]
@@ -150,7 +175,7 @@ void setup() {
   delay(300);
 
   Serial.println("# geeWhiz Started - inner loop with D1[z] (Lab 2 c)");
-  Serial.println("# commands: g s a c C v d");
+  Serial.println("# commands: g s a c C v d x X");
   Serial.print("# D1: a0=");   Serial.print(D1_A0, 9);
   Serial.print(" a1=");        Serial.print(D1_A1, 9);
   Serial.print(" b1=");        Serial.print(D1_B1, 9);
@@ -166,6 +191,7 @@ void setup() {
 // ================== Loop ==================
 // Handles commands and all printing; the ISR never prints
 void loop() {
+  printTripLog();   // before commands, so a quick restart cannot overwrite an unprinted log
   readCommands();
   reportLimitTrip();
 
@@ -219,6 +245,8 @@ void readCommands() {
       case 'C': armBatch();        break;
       case 'v': toggleStream();    break;
       case 'd': printIsrTiming();  break;
+      case 'x': armCutoffTest(+1); break;
+      case 'X': armCutoffTest(-1); break;
       default:                     break;   // ignore line endings and unknown keys
     }
   }
@@ -228,19 +256,39 @@ void startControl() {
   if (runState == RUNNING) return;
   if (fabsf(lastTheta) > START_LIMIT) {
     Serial.println("# refused: |theta| above START_LIMIT, reposition the gear");
+    if (cutoffArmed != 0) {
+      cutoffArmed = 0;   // never leave the saturator bypass waiting for a later g
+      Serial.println("# cutoff test disarmed, press x or X again once repositioned");
+    }
     return;
   }
   noInterrupts();
-  refRaw      = -refAmp;
-  refSat      = saturate(refRaw);
-  halfCount   = 0;
-  streamCount = 0;
-  overVoltage = 0;
-  limitCount  = 0;
+  int8_t test = cutoffArmed;
+  if (test != 0) {
+    refRaw = refSat = test * CUTOFF_TEST_REF;   // saturator bypassed for this run only
+  } else {
+    refRaw = -refAmp;
+    refSat = saturate(refRaw);
+  }
+  cutoffRunning = (test != 0);
+  halfCount    = 0;
+  streamCount  = 0;
+  overVoltage  = 0;
+  limitCount   = 0;
+  tripLogHead  = 0;
+  tripLogCount = 0;
+  tripPostLeft = 0;
+  tripLogReady = false;
   resetController();
-  runState    = RUNNING;
+  runState     = RUNNING;
   interrupts();
 
+  if (test != 0) {
+    Serial.print("# start cutoff_test ref=");  Serial.print(test * CUTOFF_TEST_REF, 3);
+    Serial.print(" limit=");                   Serial.print(THETA_LIMIT, 2);
+    Serial.print(" limit_samples=");           Serial.println(LIMIT_SAMPLES);
+    return;
+  }
   Serial.print("# start ctrl=D1 ref_amp=");  Serial.print(refAmp, 2);
   Serial.print(" ref_sat=");                 Serial.print(REF_SAT, 2);
   Serial.print(" dt_ms=");                   Serial.print(SAMPLE_MS);
@@ -285,14 +333,26 @@ bool armNextCapture() {
   noInterrupts();
   bool running = (runState == RUNNING);
   bool idle    = (captureState == CAP_IDLE);
-  bool full    = (refAmp == REF_AMP_FULL);
+  bool full    = (refAmp == REF_AMP_FULL) && !cutoffRunning;
   if (running && idle && full) captureState = CAP_ARMED;
   interrupts();
 
   if (!running)    Serial.println("# refused: start with g first");
-  else if (!full)  Serial.println("# refused: captures need the full amplitude (s, a, g)");
+  else if (!full)  Serial.println("# refused: captures need the full amplitude (s, a, g), not the cutoff test");
   else if (!idle)  Serial.println("# refused: capture already in progress");
   return running && idle && full;
+}
+
+// x / X: the next g drives the gear toward +-CUTOFF_TEST_REF so the cutoff must fire
+void armCutoffTest(int8_t sign) {
+  if (runState == RUNNING) {
+    Serial.println("# refused: stop with s before arming the cutoff test");
+    return;
+  }
+  cutoffArmed = sign;
+  Serial.print("# CUTOFF TEST armed toward ");
+  Serial.print(sign * CUTOFF_TEST_REF, 2);
+  Serial.println(" rad. THE BEAM MUST BE DISCONNECTED. g runs it, s cancels");
 }
 
 void armCapture() {
@@ -362,14 +422,17 @@ void resetController() {
 
 // Called from the ISR, or from loop() with interrupts off
 void stopControl() {
-  runState     = STOPPED;
-  motorVoltage = 0.0f;
+  runState      = STOPPED;
+  motorVoltage  = 0.0f;
+  cutoffRunning = false;
+  cutoffArmed   = 0;      // the cutoff test is one-shot: every stop disarms it
   resetController();
   if (captureState != CAP_READY) captureState = CAP_IDLE;
 }
 
 // Flips the raw reference every HALF_PERIOD_SAMPLES; returns true on the flip
 bool updateReference() {
+  if (cutoffRunning) return false;   // the cutoff test holds one reference, no edges
   halfCount++;
   bool edge = (halfCount >= HALF_PERIOD_SAMPLES);
   if (edge) {
@@ -421,6 +484,20 @@ void recordSample(uint32_t tUs, int motor) {
   captureState = (stepSlot == CAPTURE_EDGES - 1) ? CAP_READY : CAP_BETWEEN;
 }
 
+// Keeps the last TRIP_LOG_N samples while running; after a trip, records
+// TRIP_POST more (the gear coasting at 0 V) and then freezes for printing
+void logTripSample(float theta) {
+  bool running = (runState == RUNNING);
+  if (!running && tripPostLeft == 0) return;
+
+  tripLogTheta[tripLogHead] = theta;
+  tripLogV[tripLogHead]     = motorVoltage;
+  tripLogHead = (tripLogHead + 1) % TRIP_LOG_N;
+  if (tripLogCount < TRIP_LOG_N) tripLogCount++;
+
+  if (!running && --tripPostLeft == 0) tripLogReady = true;
+}
+
 void updateStream(uint32_t nowMs, float theta) {
   if (++streamCount < STREAM_EVERY) return;
   streamCount = 0;
@@ -462,6 +539,33 @@ void printStream() {
   Serial.print(sat, 3);   Serial.print(",");
   Serial.print(th, 4);    Serial.print(",");
   Serial.println(v, 3);
+}
+
+// Prints the frozen trip log, oldest sample first; i = 0 is the sample that stopped the loop
+void printTripLog() {
+  if (!tripLogReady) return;
+
+  float theta[TRIP_LOG_N], volts[TRIP_LOG_N];
+  noInterrupts();
+  int n = tripLogCount;
+  int first = (tripLogHead - n + TRIP_LOG_N) % TRIP_LOG_N;
+  for (int k = 0; k < n; k++) {
+    theta[k] = tripLogTheta[(first + k) % TRIP_LOG_N];
+    volts[k] = tripLogV[(first + k) % TRIP_LOG_N];
+  }
+  tripLogReady = false;
+  interrupts();
+
+  int tripAt = n - 1 - TRIP_POST;
+  Serial.print("# trip log: ");     Serial.print(n);
+  Serial.print(" samples at 1 ms, limit "); Serial.print(THETA_LIMIT, 2);
+  Serial.println(" rad; trip,i,theta,V with i = 0 the sample that stopped the loop");
+  for (int k = 0; k < n; k++) {
+    Serial.print("trip,");          Serial.print(k - tripAt);
+    Serial.print(",");              Serial.print(theta[k], 4);
+    Serial.print(",");              Serial.println(volts[k], 3);
+  }
+  Serial.println("# end trip log");
 }
 
 void dumpCapture() {
@@ -513,6 +617,7 @@ void interval_control_code(void) {
       tripTheta = theta;
       stopControl();
       limitTripped = true;
+      tripPostLeft = TRIP_POST + 1;   // this sample, then TRIP_POST more while the gear coasts
     } else {
       bool edge = updateReference();
       // A single reading beyond the limit is not trusted: 0 V for this sample,
@@ -523,6 +628,8 @@ void interval_control_code(void) {
       recordSample(tUs, motor);
     }
   }
+
+  logTripSample(theta);
 
   // Streams while stopped too (V = 0), so the gear can be centred by hand
   updateStream(millis(), theta);

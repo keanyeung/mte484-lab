@@ -54,7 +54,7 @@ CAPTURE_SAMPLES = 800        # samples per captured step, 1 ms each
 TS_MAX = 0.40                # 2 % settling time, hardware spec [s]
 OS_MAX_PCT = 5.0             # overshoot spec [%]
 V_MAX = 6.0                  # motor voltage spec [V]
-V_ALLOW = 0.30               # excess allowed over V_MAX, ~ the largest stiction offset [V]
+V_ALLOW_MARGIN = 0.025       # excess allowed over V_MAX = the run's largest stiction offset + this [V]
 SS_TOL = 0.01                # |steady-state error| accepted as zero, noise is ~0.004 rad [rad]
 THETA_MAX = math.pi / 4      # gear damage limit [rad]
 SETTLE_FRAC = 0.02           # settling band as a fraction of the step
@@ -64,6 +64,7 @@ MEDIAN_WINDOW = 5            # centred median filter length
 HEADER_RE = re.compile(r"^#\s*capture\s+(\d+)\s+ctrl=(\S+)\s+dir=([+-])\s+dt_us=(\d+)\s+"
                        r"samples=(\d+)\s+over6=(\d+)")
 END_RE = re.compile(r"^#\s*end capture\s+(\d+)")
+START_RE = re.compile(r"^#\s*start\b.*stiction_pos=(-?\d+\.\d+)\s+stiction_neg=(-?\d+\.\d+)")
 ROW_RE = re.compile(r"^(\d+),(\d+),(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+),(\d+),(-?\d+\.\d+)$")
 
 STEP_FIELDS = ["source", "id", "dir", "os_pct", "ts_s", "ss_err", "v_peak", "v_excess",
@@ -98,23 +99,33 @@ def simulate_step(direction, n=CAPTURE_SAMPLES):
 
 
 # ---------------------------------------------------------------- loading
-def new_capture(match, source):
+def new_capture(match, source, stiction):
     cid, ctrl, sign, dt_us, samples, over6 = match.groups()
     return {"source": source, "id": int(cid), "ctrl": ctrl, "dir": 1 if sign == "+" else -1,
             "dt_us": int(dt_us), "samples": int(samples), "over6": int(over6),
-            "ref": None, "t": [], "theta": [], "v": [], "u": []}
+            "stiction": stiction, "ref": None, "t": [], "theta": [], "v": [], "u": []}
 
 
 def parse_captures(lines, source):
-    """Return the complete capture blocks in a CoolTerm log, one dict per step."""
+    """Return the complete capture blocks in a CoolTerm log, one dict per step.
+
+    Each capture carries the stiction offsets from the most recent '# start'
+    line before it, so beam-on runs with new offsets are judged on their own.
+    """
     captures, cur = [], None
+    stiction, from_start = (STICTION_POS, STICTION_NEG), False
     for raw in lines:
         line = raw.strip()
+        m = START_RE.match(line)
+        if m:
+            stiction, from_start = (float(m.group(1)), float(m.group(2))), True
+            continue
         m = HEADER_RE.match(line)
         if m:
             if cur is not None:
                 print(f"# skipped capture {cur['id']} in {source}: no end line before the next capture")
-            cur = new_capture(m, source)
+            cur = new_capture(m, source, stiction)
+            cur["stiction_from_start"] = from_start
             continue
         if cur is None:
             continue
@@ -191,7 +202,8 @@ def metrics_from_arrays(direction, t, theta, v, u=None):
 
 def step_metrics(cap):
     rec = metrics_from_arrays(cap["dir"], cap["t"], cap["theta"], cap["v"], cap["u"])
-    rec.update(source=cap["source"], id=cap["id"], over6=cap["over6"])
+    rec.update(source=cap["source"], id=cap["id"], over6=cap["over6"],
+               v_allow=max(cap["stiction"]) + V_ALLOW_MARGIN)
     return rec
 
 
@@ -203,6 +215,8 @@ def spec_checks(records):
     os_worst = max(r["os_pct"] for r in records)
     ss_worst = max(abs(r["ss_err"]) for r in records)
     v_worst = max(r["v_peak"] for r in records)
+    v_over = [r for r in records if r["v_peak"] > V_MAX + r["v_allow"]]
+    allow = max(r["v_allow"] for r in records)
     th_worst = max(r["theta_max"] for r in records)
     ts_detail = (f"{len(unsettled)} step(s) never settled" if unsettled
                  else f"worst {ts_worst * 1000:.0f} ms, limit {TS_MAX * 1000:.0f} ms")
@@ -217,9 +231,9 @@ def spec_checks(records):
          f"worst |ref - theta| = {ss_worst:.4f} rad, tolerance {SS_TOL}"),
         ("2 % settling time", not unsettled and ts_worst <= TS_MAX, ts_detail),
         ("overshoot", os_worst <= OS_MAX_PCT, f"worst {os_worst:.2f} %, limit {OS_MAX_PCT:.0f} %"),
-        ("motor voltage", v_worst <= V_MAX + V_ALLOW,
-         f"worst |V| = {v_worst:.3f} V, limit {V_MAX:.0f} V + {V_ALLOW:.2f} V stiction allowance "
-         f"(offsets {STICTION_POS} / {STICTION_NEG} V)"),
+        ("motor voltage", not v_over,
+         f"worst |V| = {v_worst:.3f} V, limit {V_MAX:.0f} V + the run's largest stiction offset "
+         f"+ {V_ALLOW_MARGIN} V (up to {allow:.3f} V here), {len(v_over)} step(s) beyond"),
     ]
 
 
@@ -287,24 +301,34 @@ def main(argv):
         print("no complete captures found; pass files or put them next to this script")
         return 1
 
+    # Outputs go next to the captures, so a beam-on run elsewhere never overwrites part (c)'s
+    out_dir = Path(argv[0]).resolve().parent if argv else HERE
+    steps_csv, overlay_csv = out_dir / STEPS_CSV.name, out_dir / OVERLAY_CSV.name
+    sim_csv = next((p for p in (out_dir / SIM_CSV.name, SIM_CSV) if p.exists()), None)
+
+    no_start = sum(not c["stiction_from_start"] for c in captures)
+    if no_start:
+        print(f"# note: {no_start} capture(s) had no '# start' line before them; their voltage "
+              f"allowance uses the part (c) offsets {STICTION_POS} / {STICTION_NEG} V")
+
     records = [step_metrics(c) for c in captures]
     print_steps(records)
-    write_csv(STEPS_CSV, STEP_FIELDS, records)
+    write_csv(steps_csv, STEP_FIELDS, records)
 
     checks = spec_checks(records)
     print(f"\nspecs over {len(records)} steps (worst case):")
     for name, ok, detail in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
 
-    if SIM_CSV.exists():
-        sim, label = load_sim_csv(SIM_CSV), SIM_CSV.name
+    if sim_csv is not None:
+        sim, label = load_sim_csv(sim_csv), sim_csv.name
     else:
         sim, label = {d: simulate_step(d) for d in (1, -1)}, "built-in model (no sim_lab2b_steps.csv)"
     print(f"\nmeasured vs simulation ({label}), mean per direction:")
     for line in compare(captures, sim):
         print(line)
-    write_csv(OVERLAY_CSV, OVERLAY_FIELDS, overlay_rows(captures, sim))
-    print(f"\nwrote {STEPS_CSV.name} and {OVERLAY_CSV.name}")
+    write_csv(overlay_csv, OVERLAY_FIELDS, overlay_rows(captures, sim))
+    print(f"\nwrote {steps_csv.name} and {overlay_csv.name} to {out_dir}")
 
     ok = all(c[1] for c in checks)
     print("\nall specs met" if ok else "\nsome specs NOT met")

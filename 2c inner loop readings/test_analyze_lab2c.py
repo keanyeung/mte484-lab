@@ -8,6 +8,7 @@ recover the metrics the loop was built with.
 Usage (from this folder):
     py -3 -m unittest test_analyze_lab2c -v
 """
+import contextlib
 import io
 import math
 import tempfile
@@ -281,6 +282,51 @@ class SimFileTest(unittest.TestCase):
         short = lab.simulate_step(+1)
         sim = {+1: {k: v[:300] for k, v in short.items()}}
         self.assertEqual(len(lab.overlay_rows(caps, sim)), 300)
+
+
+# ---------------------------------------------------------------- beam-on runs (Lab 2 d)
+START_BEAM = ("# start ctrl=D1 ref_amp=1.00 ref_sat=0.70 dt_ms=1 half_period_ms=1000 "
+              "stiction_pos=0.450 stiction_neg=0.400\n")
+
+
+class RunStictionTest(unittest.TestCase):
+
+    def test_start_line_sets_the_capture_stiction(self):
+        cap = parse_one(START_BEAM + capture_text(1, +1, *clean_step(+1)))
+        self.assertEqual(cap["stiction"], (0.45, 0.40))
+
+    def test_no_start_line_falls_back_to_the_part_c_offsets(self):
+        cap = parse_one(capture_text(1, +1, *clean_step(+1)))
+        self.assertEqual(cap["stiction"], (lab.STICTION_POS, lab.STICTION_NEG))
+
+    def test_later_start_line_applies_to_later_captures_only(self):
+        text = (capture_text(1, +1, *clean_step(+1)) + START_BEAM
+                + capture_text(2, -1, *clean_step(-1)))
+        caps = lab.parse_captures(io.StringIO(text), "synthetic")
+        self.assertEqual([c["stiction"] for c in caps],
+                         [(lab.STICTION_POS, lab.STICTION_NEG), (0.45, 0.40)])
+
+    def test_voltage_allowance_follows_the_run_stiction(self):
+        theta, u = clean_step(+1)
+        v = [stiction(x) for x in u]
+        v[5] = -(lab.V_MAX + 0.42)            # inside 0.45 V offsets, beyond the part (c) ones
+        beam = lab.step_metrics(parse_one(START_BEAM + capture_text(1, +1, theta, u, v)))
+        plain = lab.step_metrics(parse_one(capture_text(1, +1, theta, u, v)))
+        self.assertTrue(check_by_name(lab.spec_checks([beam]), "voltage")[1])
+        self.assertFalse(check_by_name(lab.spec_checks([plain]), "voltage")[1])
+
+
+class OutputFolderTest(unittest.TestCase):
+
+    def test_csvs_are_written_next_to_the_input_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "beam_run.txt"
+            path.write_text(capture_text(0, +1, *clean_step(+1)) + capture_text(1, -1, *clean_step(-1)))
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = lab.main([str(path)])
+            self.assertEqual(rc, 0)
+            self.assertTrue((Path(d) / "lab2c_steps.csv").exists())
+            self.assertTrue((Path(d) / "lab2c_overlay.csv").exists())
 
 
 if __name__ == "__main__":
