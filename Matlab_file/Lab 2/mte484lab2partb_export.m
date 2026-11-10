@@ -28,7 +28,12 @@ tDown = tr(find(tr > 3.5 & rr < 0, 1));
 rows = [exportStep(+1, tUp,   tk, theta, Vcmd);
         exportStep(-1, tDown, tk, theta, Vcmd)];
 
-outFile = fullfile('..', '..', '2c inner loop readings', 'sim_lab2b_steps.csv');
+targetDir = fullfile('..', '..', '2c inner loop readings');
+if exist(targetDir, 'dir')
+    outFile = fullfile(targetDir, 'sim_lab2b_steps.csv');
+else
+    outFile = 'sim_lab2b_steps.csv';
+end
 fid = fopen(outFile, 'w');
 if fid < 0
     error('could not open %s for writing', outFile);
