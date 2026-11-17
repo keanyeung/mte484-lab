@@ -20,6 +20,11 @@ Lab 3 builds on the inner gear-position loop developed in Lab 2 to control the b
 
 ```text
 Lab 3/
+├── csv_exports/                # Part (c2) simulation data & metric CSV exports
+│   ├── lab3_partc2_continuous_performance.csv
+│   ├── lab3_partc2_discrete_performance.csv
+│   ├── lab3_partc2_summary.csv
+│   └── lab3_partc2_timeseries.csv
 ├── mte484lab3parta.slx          # Part (a) Simulink model (Continuous outer loop + inner loop)
 ├── mte484lab3partasetup.m      # Part (a) parameters, controller definition, & reference config
 ├── mte484lab3parta.m          # Part (a) runner script & step response performance analysis

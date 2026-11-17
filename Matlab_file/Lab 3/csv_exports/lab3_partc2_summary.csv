@@ -1,0 +1,8 @@
+Metric,Value
+Maximum_Position_Difference_mm,0.0857087110994748
+RMS_Position_Difference_mm,0.0251812628921157
+Peak_Continuous_Voltage_V,2.83564994927412
+Peak_Discrete_Voltage_V,2.84348730960995
+Peak_Continuous_Gear_Angle_rad,0.708219352965707
+Peak_Discrete_Gear_Angle_rad,0.708852032442036
+Sampling_Period_s,0.001
