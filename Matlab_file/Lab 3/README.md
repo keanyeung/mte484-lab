@@ -26,6 +26,11 @@ Lab 3/
 ├── mte484lab3partb.slx          # Part (b) Simulink model (Continuous vs Discrete comparison)
 ├── mte484lab3partbsetup.m      # Part (b) Tustin discretization & coefficient extraction
 ├── mte484lab3partbrun.m        # Part (b) runner script, comparison plotting, & metric reporting
+├── mte484lab3partcsetup.m      # Part (c/c2) improved outer controller pole placement & discretization
+├── mte484lab3partc.slx          # Part (c) Simulink model (ball initial position at 0 m)
+├── mte484lab3partcrun.m        # Part (c) runner & step response performance analysis
+├── mte484lab3partc2.slx         # Part (c2) Simulink model (initial position at 0.10 m via integrators)
+├── mte484lab3partcrun2.m       # Part (c2) runner & step response performance analysis
 └── README.md                    # Lab 3 documentation
 ```
 
@@ -44,6 +49,15 @@ Lab 3/
 - Discretization method: **Tustin** (bilinear approximation) via `c2d(C2, Ts, 'tustin')`.
 - Discrete transfer function $D_2(z)$ coefficients are extracted using `tfdata(D2, 'v')` for digital implementation on the real-time target.
 
+### Part (c) & Part (c2) Improved Outer Loop Controller Design
+- Controller structure:
+  $$C_2(s) = -\frac{a_2 s^2 + a_1 s + a_0}{s(s + p)}$$
+- Dominant desired poles placed at $-0.9 \pm 0.6j$ and non-dominant poles at $-2, -4$.
+- Discretized via Tustin at $T_s = 0.001\text{ s}$ yielding $D_2(z)$.
+
+#### Part (c) vs. Part (c2) Comparison
+The main difference between Part (c) and Part (c2) is the **initial ball position**. In Part (c), the ball starts at 0 m, resulting in a large initial overshoot of approximately 64%. In Part (c2), the ball dynamics are modelled using two integrators, with an initial velocity of 0 m/s and an initial position of 0.10 m. This better represents the intended experimental starting condition and reduces the initial overshoot to approximately 40.18%. Both models use the same controllers and plant parameters, with nearly identical settling times of 6.22 s for the subsequent reference transitions.
+
 ---
 
 ## 4. How to Run
@@ -60,3 +74,7 @@ Lab 3/
    - Simulate `mte484lab3partb.slx` for 60 seconds.
    - Plot continuous vs. discrete ball position trajectories.
    - Print performance metrics and maximum error between continuous and discrete implementations.
+
+### Part (c) & Part (c2) Simulation & Analysis
+1. Run `mte484lab3partcrun.m` to simulate `mte484lab3partc.slx` (starting from 0 m) and evaluate settling time and overshoot.
+2. Run `mte484lab3partcrun2.m` to simulate `mte484lab3partc2.slx` (starting from 0.10 m initial position) and verify the improved initial transient response.
