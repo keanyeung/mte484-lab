@@ -59,14 +59,10 @@ class SplitD2:
     aw=True: conditional integration - the integrator holds whenever the output
     is saturated and integrating would push it further into saturation."""
     def __init__(self, c2n, c2d, aw):
-        a2, a1, a0 = -c2n
-        p = c2d[1]
-        self.kp, self.ki, self.r, self.p = a2, a0 / p, a1 - a2 * p - a0 / p, p
+        sc = d.split_coefficients(c2n, c2d)   # the constants lab3d_outer_loop copies
+        self.kp, self.ki, self.lb, self.la = sc["KP"], sc["KI"], sc["LB"], sc["LA"]
         self.aw = aw
         self.i = self.e1 = self.x = 0.0
-        k = 2 / d.TS
-        self.lb = self.r / (k + p)     # Tustin of R/(s+p): x = -la x1 + lb (e + e1)
-        self.la = (p - k) / (k + p)
 
     def step(self, e):
         i_new = self.i + self.ki * d.TS / 2 * (e + self.e1)
@@ -176,6 +172,29 @@ if __name__ == "__main__":
                            ("split + conditional integration", SplitD2(c2n, c2d, aw=True))):
             report(f"[4] (c) D2 {name}, STICK-SLIP ball, ref starts LOW", run(ctrl, start_high=False,
                                                                               ball="stick", t_end=80))
+    if which == "export":
+        # Reference traces for the Lab 3(d) overlay. Reference starts HIGH like
+        # mte484lab3partc2.slx (ball at 0.10), so the first full period starts at
+        # the up edge at 20 s, which analyze_lab3d aligns to the hardware up edges.
+        out = Path(__file__).resolve().parent.parent / "3d outer loop readings" / "sim_lab3d.csv"
+        out.parent.mkdir(exist_ok=True)
+        cols = {}
+        for key, ctrl, ball in (("y_aw_off", LinearD2(b, a_), "linear"),
+                                ("y_aw_on", SplitD2(c2n, c2d, aw=True), "linear"),
+                                ("y_aw_off_stick", LinearD2(b, a_), "stick"),
+                                ("y_aw_on_stick", SplitD2(c2n, c2d, aw=True), "stick")):
+            rows = run(ctrl, start_high=True, ball=ball)
+            cols[key] = [rw[6] for rw in rows]
+            cols.setdefault("t_s", [rw[0] for rw in rows])
+            cols.setdefault("r", [rw[1] for rw in rows])
+            print(f"{key}: first step OS %.2f%%  Ts %s" % first_step(rows))
+            report(f"    {key} later steps:", rows)
+        names = ["t_s", "r", "y_aw_off", "y_aw_on", "y_aw_off_stick", "y_aw_on_stick"]
+        with open(out, "w", newline="") as f:
+            f.write(",".join(names) + "\n")
+            for k in range(len(cols["t_s"])):
+                f.write(",".join(f"{cols[n][k]:.5f}" for n in names) + "\n")
+        print(f"wrote {out}")
     if which == "5":
         rows = run(SplitD2(c2n, c2d, aw=True), start_high=False, ball="stick", noise_mm=0.2, t_end=40)
         quiet = [rw for rw in rows if 15 <= rw[0] < 20]

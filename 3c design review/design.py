@@ -45,6 +45,19 @@ def tustin(num, den, ts=TS):
     return b / a_[0], a_ / a_[0]
 
 
+def split_coefficients(c2n, c2d, ts=TS):
+    """C2 = -[ KP + KI/s + R/(s+p) ], each part Tustin at ts (the sum equals tustin(C2)).
+    Difference equations, with e = r - y and e1 = e[k-1]:
+        i  = i1 + KI*ts/2*(e + e1)          integrator
+        x  = -LA*x1 + LB*(e + e1)           first-order lead R/(s+p)
+        u  = -(KP*e + i + x)                gear-angle reference [rad]"""
+    a2, a1, a0 = -c2n
+    p = c2d[1]
+    k = 2 / ts
+    r = a1 - a2 * p - a0 / p
+    return {"KP": a2, "KI": a0 / p, "LB": r / (k + p), "LA": (p - k) / (k + p), "R": r, "P": p}
+
+
 def full_loop_poles(c2n, c2d):
     """1 + C2 * T1 * K2 K3 / s^2 = 0 with T1 the true inner closed loop."""
     g_den = np.polymul([TAU, 1.0, 0.0], C1D)          # d1 * s (tau s + 1)
@@ -63,6 +76,10 @@ if __name__ == "__main__":
     a2, a1, a0 = -c2n
     p = c2d[1]
     print(f"split: C2 = -[ {a2:.4f} + {a0/p:.4f}/s + {a1 - a2*p - a0/p:.4f}/(s+{p}) ]")
+    sc = split_coefficients(c2n, c2d)
+    print("split-form constants for the sketch (Ts = 1 ms):")
+    for name in ("KP", "KI", "LB", "LA"):
+        print(f"   D2_{name} = {sc[name]:.15g}")
     b, a_ = tustin(c2n, c2d)
     print("D2 num:", repr(b))
     print("D2 den:", repr(a_))
