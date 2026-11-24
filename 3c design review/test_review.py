@@ -10,15 +10,18 @@ import numpy as np
 import design as d
 import sim
 
-SKETCH = Path(__file__).resolve().parent.parent / "lab3d_outer_loop" / "lab3d_outer_loop.ino"
+ROOT = Path(__file__).resolve().parent.parent
+SKETCH = ROOT / "lab3d_outer_loop" / "lab3d_outer_loop.ino"         # Lab 3 (d)
+SKETCH_E = ROOT / "lab3e_outer_loop" / "lab3e_outer_loop.ino"       # Lab 3 (e), final/demo
+SKETCHES = (SKETCH, SKETCH_E)
 C2N, C2D = d.outer_design(d.POLES)
 B, A = d.tustin(C2N, C2D)
 
 
-def sketch_constants():
-    text = SKETCH.read_text()
+def sketch_constants(path=SKETCH):
+    text = path.read_text()
     return {m.group(1): float(m.group(2)) for m in re.finditer(
-        r"constexpr\s+(?:double|float)\s+(\w+)\s*=\s*([-+0-9.eE]+)f?\s*;", text)}
+        r"constexpr\s+(?:double|float|uint8_t|int)\s+(\w+)\s*=\s*([-+0-9.eE]+)f?\s*;", text)}
 
 
 class SplitFormTests(unittest.TestCase):
@@ -53,29 +56,57 @@ class SplitFormTests(unittest.TestCase):
 
 
 class SketchConstantTests(unittest.TestCase):
-    def test_sketch_exists(self):
-        self.assertTrue(SKETCH.exists(), f"missing {SKETCH}")
+    """Run on both the (d) sketch and the final (e) sketch."""
+
+    def test_sketches_exist(self):
+        for path in SKETCHES:
+            self.assertTrue(path.exists(), f"missing {path}")
 
     def test_split_constants_match_design(self):
-        got = sketch_constants()
         want = d.split_coefficients(C2N, C2D)
-        for name in ("KP", "KI", "LB", "LA"):
-            self.assertIn(f"D2_{name}", got)
-            self.assertAlmostEqual(got[f"D2_{name}"], want[name], delta=1e-12, msg=name)
+        for path in SKETCHES:
+            got = sketch_constants(path)
+            for name in ("KP", "KI", "LB", "LA"):
+                with self.subTest(sketch=path.name, name=name):
+                    self.assertIn(f"D2_{name}", got)
+                    self.assertAlmostEqual(got[f"D2_{name}"], want[name], delta=1e-12)
 
     def test_inner_and_saturator_unchanged(self):
-        got = sketch_constants()
-        self.assertEqual(got["D1_A0"], -2.454674639351807)
-        self.assertEqual(got["D1_A1"], 2.284293610869540)
-        self.assertEqual(got["D1_B1"], -0.967822458684839)
-        self.assertEqual(got["REF_SAT"], 0.7)
+        for path in SKETCHES:
+            got = sketch_constants(path)
+            with self.subTest(sketch=path.name):
+                self.assertEqual(got["D1_A0"], -2.454674639351807)
+                self.assertEqual(got["D1_A1"], 2.284293610869540)
+                self.assertEqual(got["D1_B1"], -0.967822458684839)
+                self.assertEqual(got["REF_SAT"], 0.7)
 
     def test_ball_offset_uses_beam_end_origin(self):
         # Lab 2 offset -0.004055 + (measured 0.030 - ball radius 0.0127) = 0.013245
-        text = SKETCH.read_text()
-        m = re.search(r"BALL_OFFSET\s*=\s*([-+0-9.eE]+)f", text)
-        self.assertAlmostEqual(float(m.group(1)), -0.004055 + (0.030 - 0.0127), places=9)
-        self.assertEqual(sketch_constants()["Y_MIN_BALL"], 0.030)
+        for path in SKETCHES:
+            m = re.search(r"BALL_OFFSET\s*=\s*([-+0-9.eE]+)f", path.read_text())
+            with self.subTest(sketch=path.name):
+                self.assertAlmostEqual(float(m.group(1)), -0.004055 + (0.030 - 0.0127), places=9)
+                self.assertEqual(sketch_constants(path)["Y_MIN_BALL"], 0.030)
+
+
+class FinalSketchTests(unittest.TestCase):
+    """Lab 3 (e): the on-board monitor uses the manual's assessment values."""
+
+    def test_e_assessment_constants(self):
+        got = sketch_constants(SKETCH_E)
+        self.assertEqual((got["E_LOW_MIN"], got["E_LOW_MAX"]), (0.094, 0.106))
+        self.assertEqual((got["E_HIGH_MIN"], got["E_HIGH_MAX"]), (0.240, 0.260))
+        self.assertEqual(got["E_SETTLE_S"], 8.5)
+        self.assertEqual(got["E_OS_PCT"], 45.0)
+        self.assertEqual(got["E_PERIODS"], 10)
+
+    def test_control_irq_raised_above_usb(self):
+        got = sketch_constants(SKETCH_E)
+        self.assertLess(got["CONTROL_IRQ_PRIORITY"], 12)      # USB serial is 12 on the R4 core
+        self.assertIn("raiseControlIrqPriority();", SKETCH_E.read_text())
+
+    def test_anti_windup_on_by_default(self):
+        self.assertRegex(SKETCH_E.read_text(), r"bool\s+awOn\s*=\s*true;")
 
 
 if __name__ == "__main__":
